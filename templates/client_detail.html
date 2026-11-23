@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }} | ACEest{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">CLIENT PROFILE</p>
+    <h1>{{ client.name }}</h1>
+    <p class="muted">{{ client.program }} · {{ client.membership_status }}</p>
+  </div>
+  <div>
+    <a class="button" href="{{ url_for('client_report', client_id=client.id) }}">Download report</a>
+    <form method="post" action="{{ url_for('delete_client', client_id=client.id) }}">
+      <button class="button danger" type="submit">Delete client</button>
+    </form>
+  </div>
+</div>
+<div class="grid four">
+  <div class="stat"><span>Weight</span><strong>{{ client.weight|int }} kg</strong></div>
+  <div class="stat"><span>Target</span><strong>{{ client.target_weight|int }} kg</strong></div>
+  <div class="stat"><span>Calories</span><strong>{{ client.estimated_calories|int }}</strong></div>
+  <div class="stat"><span>Adherence target</span><strong>{{ client.target_adherence|int }}%</strong></div>
+  <div class="stat"><span>BMI estimate</span><strong>{{ bmi }}</strong></div>
+</div>
+<div class="split">
+  <section class="panel">
+    <h2>Update plan</h2>
+    <form method="post" action="{{ url_for('update_client', client_id=client.id) }}" class="form">
+      <label>Weight kg<input name="weight" type="number" step="0.1" value="{{ client.weight }}" required></label>
+      <label>Program<select name="program">{% for name in ['Fat Loss', 'Muscle Gain', 'Beginner'] %}<option {% if name == client.program %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+      <label>Status<select name="membership_status"><option {% if client.membership_status == 'Active' %}selected{% endif %}>Active</option><option {% if client.membership_status == 'Paused' %}selected{% endif %}>Paused</option><option {% if client.membership_status == 'Expired' %}selected{% endif %}>Expired</option></select></label>
+      <label>Membership end<input name="membership_end" type="date" value="{{ client.membership_end }}"></label>
+      <button class="button" type="submit">Update plan</button>
+    </form>
+  </section>
+  <section class="panel">
+    <h2>Weekly progress</h2>
+    <form method="post" action="{{ url_for('add_progress', client_id=client.id) }}" class="form">
+      <label>Date<input name="week_date" type="date"></label>
+      <label>Adherence %<input name="adherence" type="number" min="0" max="100" required></label>
+      <button class="button" type="submit">Record progress</button>
+    </form>
+    {% for item in progress %}
+    <p class="list-line"><span>{{ item.week_date }}</span><strong>{{ item.adherence|int }}%</strong></p>
+    {% else %}
+    <p class="muted">No progress records.</p>
+    {% endfor %}
+    {% if adherence_chart %}
+    <svg viewBox="0 0 600 180" role="img" aria-label="Weekly adherence trend">
+      <polyline points="{{ adherence_chart }}" fill="none" stroke="#1b6658" stroke-width="4" />
+      {% for point in adherence_chart.split() %}
+      {% set coordinates = point.split(',') %}
+      <circle cx="{{ coordinates[0] }}" cy="{{ coordinates[1] }}" r="5" fill="#1b6658" />
+      {% endfor %}
+    </svg>
+    {% endif %}
+  </section>
+</div>
+<section class="panel">
+  <h2>Body metrics</h2>
+  <form method="post" action="{{ url_for('add_metric', client_id=client.id) }}" class="form">
+    <label>Date<input name="metric_date" type="date"></label>
+    <label>Weight (kg)<input name="weight" type="number" min="0.1" step="0.1"></label>
+    <label>Waist (cm)<input name="waist" type="number" min="0.1" step="0.1"></label>
+    <label>Body fat (%)<input name="body_fat" type="number" min="0.1" max="100" step="0.1"></label>
+    <button class="button" type="submit">Record metrics</button>
+  </form>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Date</th><th>Weight (kg)</th><th>Waist (cm)</th><th>Body fat (%)</th></tr>
+      {% for metric in metrics %}
+      <tr>
+        <td>{{ metric.metric_date }}</td>
+        <td>{{ metric.weight if metric.weight is not none else "—" }}</td>
+        <td>{{ metric.waist if metric.waist is not none else "—" }}</td>
+        <td>{{ metric.body_fat if metric.body_fat is not none else "—" }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">No body metrics recorded.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% if weight_chart %}
+  <h3>Weight trend</h3>
+  <svg viewBox="0 0 600 180" role="img" aria-label="Body weight trend">
+    <polyline points="{{ weight_chart }}" fill="none" stroke="#1b6658" stroke-width="4" />
+    {% for point in weight_chart.split() %}
+    {% set coordinates = point.split(',') %}
+    <circle cx="{{ coordinates[0] }}" cy="{{ coordinates[1] }}" r="5" fill="#1b6658" />
+    {% endfor %}
+  </svg>
+  {% endif %}
+</section>
+{% endblock %}
