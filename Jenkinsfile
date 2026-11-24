@@ -164,28 +164,23 @@ pipeline {
                 '''
             }
         }
-
+       
         stage('SonarQube analysis') {
             steps {
                 script {
-                    try {
-                        withSonarQubeEnv('sonarqube') {
-                            bat '''
-                                @echo off
-                                sonar-scanner -Dproject.settings=sonar-project.properties
-                                if errorlevel 1 exit /b %errorlevel%
-                            '''
-                        }
-                    } catch (NoSuchMethodError error) {
-                        if (!error.message?.contains("withSonarQubeEnv")) {
-                            throw error
-                        }
-                        echo 'SonarQube plugin is not installed; skipping SonarQube analysis and quality gate.'
-                        env.SONARQUBE_PLUGIN_AVAILABLE = 'false'
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('sonarqube') {
+                        bat """
+                            @echo off
+                            "${scannerHome}\\bin\\sonar-scanner.bat" -Dproject.settings=sonar-project.properties
+                            if errorlevel 1 exit /b %errorlevel%
+                        """
                     }
                 }
             }
         }
+
 
         stage('SonarQube Quality Gate') {
             when {
