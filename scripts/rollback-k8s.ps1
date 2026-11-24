@@ -1,5 +1,7 @@
 param(
-    [string]$DeploymentName = "aceest-rolling"
+    [string]$DeploymentName = "aceest-rolling",
+    [string]$ServiceName = "aceest-rolling-service",
+    [string]$Selector = "app.kubernetes.io/name=aceest-rolling"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,9 +16,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "Rollback of $DeploymentName did not become ready."
 }
 
-& kubectl get deployment $DeploymentName
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not verify deployment $DeploymentName after rollback."
-}
+& (Join-Path $PSScriptRoot "check-k8s-health.ps1") `
+    -DeploymentName $DeploymentName `
+    -ServiceName $ServiceName `
+    -Selector $Selector
 
 Write-Output "Rollback completed and the deployment is ready."

@@ -9,11 +9,12 @@ pipeline {
 
     parameters {
         string(name: 'IMAGE_REPO', defaultValue: 'ruchitabits/aceest-fitness', description: 'Docker Hub repository, for example username/aceest-fitness')
-        string(name: 'IMAGE_VERSION', defaultValue: 'v1', description: 'Optional image version')
+        string(name: 'IMAGE_VERSION', defaultValue: 'v1', description: 'Optional additional Docker tag')
         string(name: 'PYTHON_EXE', defaultValue: 'C:\\Users\\ruchi\\AppData\\Local\\Programs\\Python\\Python314\\python.exe', description: 'Absolute path to python.exe on the Windows Jenkins agent')
         string(name: 'DOCKER_EXE', defaultValue: 'C:\\Users\\ruchi\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe', description: 'Docker executable path on Windows; Linux agents use docker from PATH by default')
         string(name: 'DOCKER_USER', defaultValue: 'ruchitabits', description: 'Docker Hub username')
         booleanParam(name: 'PUBLISH_IMAGE', defaultValue: false, description: 'Push the verified image')
+        booleanParam(name: 'PUBLISH_RELEASE_TAG', defaultValue: false, description: 'Also push IMAGE_VERSION as a mutable release alias')
         booleanParam(name: 'DEPLOY_TO_K8S', defaultValue: false, description: 'Deploy after publishing')
         booleanParam(name: 'DOCKER_AUTH_DIAGNOSTIC', defaultValue: false, description: 'Test Docker Hub authentication only; skip publishing and deployment')
     }
@@ -36,13 +37,22 @@ pipeline {
                         env.IMAGE_REPO = "${dockerUser}/aceest-fitness"
                     }
                     env.IMAGE_VERSION = params.IMAGE_VERSION?.trim() ?: env.IMAGE_VERSION
-                    env.APP_VERSION = env.IMAGE_VERSION?.trim()
-                        ? env.IMAGE_VERSION.trim()
-                        : readFile('VERSION').trim()
-                    env.GIT_SHORT_SHA = bat(
-                        script: '@git rev-parse --short=12 HEAD',
+                    if (params.DEPLOY_TO_K8S && !params.PUBLISH_IMAGE) {
+                        error('DEPLOY_TO_K8S requires PUBLISH_IMAGE so the cluster can pull the image.')
+                    }
+                    if (params.PUBLISH_RELEASE_TAG && !params.PUBLISH_IMAGE) {
+                        error('PUBLISH_RELEASE_TAG requires PUBLISH_IMAGE.')
+                    }
+                    if (params.DOCKER_AUTH_DIAGNOSTIC &&
+                        (params.PUBLISH_IMAGE || params.DEPLOY_TO_K8S || params.PUBLISH_RELEASE_TAG)) {
+                        error('DOCKER_AUTH_DIAGNOSTIC cannot be combined with publishing or deployment.')
+                    }
+                    env.GIT_COMMIT_SHA = bat(
+                        script: '@git rev-parse HEAD',
                         returnStdout: true
                     ).trim()
+                    env.GIT_SHORT_SHA = env.GIT_COMMIT_SHA.take(12)
+                    env.APP_VERSION = "sha-${env.GIT_COMMIT_SHA}"
                     def defaultDockerExe = 'C:\\Users\\ruchi\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
                     def dockerExe = params.DOCKER_EXE?.trim()
                     if (isUnix() && (!dockerExe || dockerExe.equalsIgnoreCase(defaultDockerExe))) {
@@ -90,12 +100,20 @@ pipeline {
                             if ($LASTEXITCODE -ne 0) {
                                 throw "Python executable failed: $pythonExe"
                             }
+                            $pythonMinor = & $pythonExe -c 'import sys; print(sys.version_info.minor)'
+                            if ($LASTEXITCODE -ne 0 -or
+                                (& $pythonExe -c 'import sys; print(sys.version_info.major)') -ne '3' -or
+                                [int]$pythonMinor -lt 12 -or [int]$pythonMinor -gt 14) {
+                                throw 'The Jenkins pipeline supports Python 3.12 through 3.14.'
+                            }
                             Write-Output $pythonExe
                         '''
                     ).trim()
                 }
                 bat '''
                     @echo off
+                    "%PYTHON_EXE%" --version
+                    if errorlevel 1 exit /b %errorlevel%
                     "%PYTHON_EXE%" -m venv .venv
                     if errorlevel 1 exit /b %errorlevel%
                 '''
@@ -183,25 +201,58 @@ pipeline {
         stage('Docker image build') {
             steps {
                 script {
-                    env.LOCAL_IMAGE = "aceest-fitness:${env.IMAGE_VERSION}"
-                    if (isUnix()) {
-                        sh '''
-                            set -eu
-                            "$DOCKER_EXE" build --target runtime --build-arg "APP_VERSION=$IMAGE_VERSION" \
-                                --tag "$LOCAL_IMAGE" --tag "aceest-fitness:$GIT_SHORT_SHA" .
-                        '''
-                    } else {
+                    env.LOCAL_IMAGE = "aceest-fitness:${env.APP_VERSION}"
+                    if (!isUnix()) {
                         powershell '''
                             $dockerServerVersion = & $env:DOCKER_EXE info --format '{{.ServerVersion}}' 2>$null
                             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dockerServerVersion)) {
                                 throw "Cannot connect to Docker Engine at npipe:////./pipe/dockerDesktopLinuxEngine. Ensure Docker Desktop's Linux engine is running and the Jenkins service account can access the named pipe."
                             }
                         '''
-                        bat '''
-                            @echo off
-                            "%DOCKER_EXE%" build --target runtime --build-arg APP_VERSION="%IMAGE_VERSION%" --tag "%LOCAL_IMAGE%" --tag "aceest-fitness:%GIT_SHORT_SHA%" .
-                            if errorlevel 1 exit /b %errorlevel%
-                        '''
+                    }
+                    def buildxStatus
+                    if (isUnix()) {
+                        buildxStatus = sh(
+                            returnStatus: true,
+                            script: '"$DOCKER_EXE" buildx version >/dev/null 2>&1'
+                        )
+                    } else {
+                        buildxStatus = bat(
+                            returnStatus: true,
+                            script: '@"%DOCKER_EXE%" buildx version >nul 2>nul'
+                        )
+                    }
+                    if (buildxStatus == 0) {
+                        if (isUnix()) {
+                            sh '''
+                                set -eu
+                                "$DOCKER_EXE" buildx build --load --progress=plain --target runtime \
+                                    --build-arg "APP_VERSION=$APP_VERSION" --tag "$LOCAL_IMAGE" .
+                            '''
+                        } else {
+                            bat '''
+                                @echo off
+                                "%DOCKER_EXE%" buildx build --load --progress=plain --target runtime --build-arg "APP_VERSION=%APP_VERSION%" --tag "%LOCAL_IMAGE%" .
+                                if errorlevel 1 exit /b %errorlevel%
+                            '''
+                        }
+                    } else {
+                        echo 'Buildx is unavailable; using docker build with BuildKit enabled. A legacy builder is not supported.'
+                        withEnv(['DOCKER_BUILDKIT=1']) {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+                                    "$DOCKER_EXE" build --target runtime --build-arg "APP_VERSION=$APP_VERSION" \
+                                        --tag "$LOCAL_IMAGE" .
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    "%DOCKER_EXE%" build --target runtime --build-arg "APP_VERSION=%APP_VERSION%" --tag "%LOCAL_IMAGE%" .
+                                    if errorlevel 1 exit /b %errorlevel%
+                                '''
+                            }
+                        }
                     }
                 }
             }
@@ -210,19 +261,85 @@ pipeline {
         stage('Docker test image') {
             steps {
                 script {
+                    def buildxStatus
+                    if (isUnix()) {
+                        buildxStatus = sh(
+                            returnStatus: true,
+                            script: '"$DOCKER_EXE" buildx version >/dev/null 2>&1'
+                        )
+                    } else {
+                        buildxStatus = bat(
+                            returnStatus: true,
+                            script: '@"%DOCKER_EXE%" buildx version >nul 2>nul'
+                        )
+                    }
+                    if (buildxStatus == 0) {
+                        if (isUnix()) {
+                            sh '''
+                                set -eu
+                                "$DOCKER_EXE" buildx build --load --progress=plain --target test \
+                                    --tag "aceest-fitness:test-$GIT_SHORT_SHA" .
+                                "$DOCKER_EXE" run --rm "aceest-fitness:test-$GIT_SHORT_SHA"
+                            '''
+                        } else {
+                            bat '''
+                                @echo off
+                                "%DOCKER_EXE%" buildx build --load --progress=plain --target test --tag "aceest-fitness:test-%GIT_SHORT_SHA%" .
+                                if errorlevel 1 exit /b %errorlevel%
+                                "%DOCKER_EXE%" run --rm "aceest-fitness:test-%GIT_SHORT_SHA%"
+                                if errorlevel 1 exit /b %errorlevel%
+                            '''
+                        }
+                    } else {
+                        echo 'Buildx is unavailable; using docker build with BuildKit enabled. A legacy builder is not supported.'
+                        withEnv(['DOCKER_BUILDKIT=1']) {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+                                    "$DOCKER_EXE" build --target test --tag "aceest-fitness:test-$GIT_SHORT_SHA" .
+                                    "$DOCKER_EXE" run --rm "aceest-fitness:test-$GIT_SHORT_SHA"
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    "%DOCKER_EXE%" build --target test --tag "aceest-fitness:test-%GIT_SHORT_SHA%" .
+                                    if errorlevel 1 exit /b %errorlevel%
+                                    "%DOCKER_EXE%" run --rm "aceest-fitness:test-%GIT_SHORT_SHA%"
+                                    if errorlevel 1 exit /b %errorlevel%
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Runtime container health check') {
+            steps {
+                script {
                     if (isUnix()) {
                         sh '''
                             set -eu
-                            "$DOCKER_EXE" build --target test --tag "aceest-fitness:test-$GIT_SHORT_SHA" .
-                            "$DOCKER_EXE" run --rm "aceest-fitness:test-$GIT_SHORT_SHA"
+                            container="aceest-health-${BUILD_NUMBER}-${GIT_SHORT_SHA}"
+                            cleanup() { "$DOCKER_EXE" rm --force --volumes "$container" >/dev/null 2>&1 || true; }
+                            trap cleanup EXIT
+                            "$DOCKER_EXE" run --detach --name "$container" --publish 127.0.0.1::5000 "$LOCAL_IMAGE"
+                            port=$("$DOCKER_EXE" port "$container" 5000/tcp | sed 's/.*://')
+                            for attempt in $(seq 1 90); do
+                                status=$("$DOCKER_EXE" inspect --format='{{.State.Health.Status}}' "$container")
+                                [ "$status" = healthy ] && break
+                                [ "$status" != unhealthy ] || { echo "Container health check failed." >&2; exit 1; }
+                                sleep 2
+                            done
+                            [ "$status" = healthy ] || { echo "Container did not become healthy." >&2; exit 1; }
+                            curl --fail --silent --show-error "http://127.0.0.1:$port/health"
                         '''
                     } else {
-                        bat '''
-                            @echo off
-                            "%DOCKER_EXE%" build --target test --tag "aceest-fitness:test-%GIT_SHORT_SHA%" .
-                            if errorlevel 1 exit /b %errorlevel%
-                            "%DOCKER_EXE%" run --rm "aceest-fitness:test-%GIT_SHORT_SHA%"
-                            if errorlevel 1 exit /b %errorlevel%
+                        powershell '''
+                            $ErrorActionPreference = 'Stop'
+                            & (Join-Path $PWD 'scripts/check-container-health.ps1') `
+                                -DockerExe $env:DOCKER_EXE `
+                                -Image $env:LOCAL_IMAGE
                         '''
                     }
                 }
@@ -486,36 +603,16 @@ pipeline {
             }
         }
 
-        stage('Docker Hub authentication') {
+        stage('Docker Hub authentication and publishing') {
             when { expression { params.PUBLISH_IMAGE && !params.DOCKER_AUTH_DIAGNOSTIC } }
             steps {
                 script {
-                    if (!env.IMAGE_REPO?.trim()) {
-                        error('Set IMAGE_REPO to username/aceest-fitness before publishing.')
+                    if (!env.IMAGE_REPO?.trim() || !params.DOCKER_USER?.trim()) {
+                        error('Set IMAGE_REPO and DOCKER_USER before publishing.')
                     }
-                }
-                script {
-                    if (!isUnix()) {
-                        powershell '''
-                            $dockerConfig = $env:DOCKER_CONFIG
-                            if ([string]::IsNullOrWhiteSpace($dockerConfig)) {
-                                $dockerConfig = 'not set'
-                            }
-
-                            Write-Output "Windows identity: $(whoami)"
-                            Write-Output "USERPROFILE: $env:USERPROFILE"
-                            Write-Output "DOCKER_CONFIG: $dockerConfig"
-                            Write-Output "Docker executable: $env:DOCKER_EXE"
-                            Write-Output "Docker endpoint: $env:DOCKER_HOST"
-
-                            $dockerServerName = & $env:DOCKER_EXE info --format '{{.Name}}'
-                            Write-Output "Docker server name: $dockerServerName"
-
-                            $dockerClientVersion = & $env:DOCKER_EXE version --format '{{.Client.Version}}'
-                            $dockerServerVersion = & $env:DOCKER_EXE version --format '{{.Server.Version}}'
-                            Write-Output "Docker client version: $dockerClientVersion"
-                            Write-Output "Docker server version: $dockerServerVersion"
-                        '''
+                    if (params.PUBLISH_RELEASE_TAG &&
+                        !(params.IMAGE_VERSION ==~ /[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}/)) {
+                        error('IMAGE_VERSION must be a valid Docker tag when PUBLISH_RELEASE_TAG is enabled.')
                     }
                 }
                 withCredentials([string(credentialsId: 'dockerhub-pat-working', variable: 'DOCKER_PAT')]) {
@@ -524,41 +621,54 @@ pipeline {
                             sh '''
                                 set +x
                                 set -eu
+                                temp_config=$(mktemp -d)
+                                previous_config="${DOCKER_CONFIG-}"
+                                had_config="${DOCKER_CONFIG+x}"
+                                cleanup() {
+                                    unset DOCKER_PAT dockerPat
+                                    rm -rf -- "$temp_config"
+                                    if [ "$had_config" = "x" ]; then
+                                        DOCKER_CONFIG="$previous_config"
+                                        export DOCKER_CONFIG
+                                    else
+                                        unset DOCKER_CONFIG
+                                    fi
+                                }
+                                trap cleanup EXIT
                                 dockerPat="${DOCKER_PAT:-}"
-                                trap 'unset dockerPat DOCKER_PAT' EXIT
-                                if [ -z "${DOCKER_USER:-}" ]; then
-                                    echo "Set the DOCKER_USER build parameter before publishing." >&2
+                                if [ -z "${DOCKER_USER:-}" ] || [ -z "$dockerPat" ]; then
+                                    echo "Docker Hub publishing inputs are not configured." >&2
                                     exit 1
                                 fi
-                                if [ -z "$dockerPat" ]; then
-                                    echo "Set the DOCKER_PAT build parameter before publishing." >&2
-                                    exit 1
-                                fi
+                                export DOCKER_CONFIG="$temp_config"
                                 unset DOCKER_PAT
-                                set +e
-                                printf "%s" "$dockerPat" | "$DOCKER_EXE" login --username "$DOCKER_USER" --password-stdin
-                                login_status=$?
-                                set -e
+                                printf "%s" "$dockerPat" | "$DOCKER_EXE" login --username "$DOCKER_USER" --password-stdin >/dev/null 2>&1
                                 unset dockerPat
-                                exit "$login_status"
+                                "$DOCKER_EXE" tag "$LOCAL_IMAGE" "$IMAGE_REPO:$APP_VERSION"
+                                "$DOCKER_EXE" push "$IMAGE_REPO:$APP_VERSION"
+                                if [ "$PUBLISH_RELEASE_TAG" = "true" ]; then
+                                    "$DOCKER_EXE" tag "$LOCAL_IMAGE" "$IMAGE_REPO:$IMAGE_VERSION"
+                                    "$DOCKER_EXE" push "$IMAGE_REPO:$IMAGE_VERSION"
+                                fi
                             '''
                         } else {
                             powershell '''
-                                $dockerUser = [string]$env:DOCKER_USER
+                                $ErrorActionPreference = 'Stop'
                                 $dockerPat = [string]$env:DOCKER_PAT
+                                $dockerUser = [string]$env:DOCKER_USER
+                                $tempConfig = Join-Path $env:TEMP ('aceest-docker-' + [Guid]::NewGuid().ToString('N'))
+                                $previousDockerConfig = $env:DOCKER_CONFIG
+                                $hadDockerConfig = Test-Path Env:DOCKER_CONFIG
                                 $dockerProcess = $null
                                 $dockerStarted = $false
 
                                 try {
-                                    if ([string]::IsNullOrWhiteSpace($dockerUser)) {
-                                        throw "Set the DOCKER_USER build parameter before publishing."
+                                    if ([string]::IsNullOrWhiteSpace($dockerUser) -or
+                                        [string]::IsNullOrWhiteSpace($dockerPat)) {
+                                        throw 'Docker Hub publishing inputs are not configured.'
                                     }
-                                    if ([string]::IsNullOrWhiteSpace($dockerPat)) {
-                                        throw "Set the DOCKER_PAT build parameter before publishing."
-                                    }
-
-                                    $dockerUser = $dockerUser.Trim()
-                                    $dockerPat = $dockerPat.Trim()
+                                    [System.IO.Directory]::CreateDirectory($tempConfig) | Out-Null
+                                    $env:DOCKER_CONFIG = $tempConfig
                                     Remove-Item Env:DOCKER_PAT -ErrorAction SilentlyContinue
 
                                     $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -566,25 +676,45 @@ pipeline {
                                     $processStartInfo.Arguments = 'login --username "{0}" --password-stdin' -f $dockerUser
                                     $processStartInfo.UseShellExecute = $false
                                     $processStartInfo.RedirectStandardInput = $true
+                                    $processStartInfo.RedirectStandardOutput = $true
+                                    $processStartInfo.RedirectStandardError = $true
                                     $processStartInfo.CreateNoWindow = $true
 
                                     $dockerProcess = New-Object System.Diagnostics.Process
                                     $dockerProcess.StartInfo = $processStartInfo
                                     if (-not $dockerProcess.Start()) {
-                                        throw "Unable to start Docker Hub authentication."
+                                        throw 'Unable to start Docker Hub authentication.'
                                     }
                                     $dockerStarted = $true
-                                    try {
-                                        $dockerProcess.StandardInput.WriteLine($dockerPat)
-                                        $dockerProcess.StandardInput.Flush()
-                                    } finally {
-                                        $dockerPat = $null
-                                        $dockerProcess.StandardInput.Close()
-                                    }
-
+                                    $stdoutTask = $dockerProcess.StandardOutput.ReadToEndAsync()
+                                    $stderrTask = $dockerProcess.StandardError.ReadToEndAsync()
+                                    $dockerProcess.StandardInput.WriteLine($dockerPat)
+                                    $dockerProcess.StandardInput.Close()
+                                    $dockerPat = $null
                                     $dockerProcess.WaitForExit()
+                                    $null = $stdoutTask.GetAwaiter().GetResult()
+                                    $null = $stderrTask.GetAwaiter().GetResult()
                                     if ($dockerProcess.ExitCode -ne 0) {
                                         throw "Docker Hub authentication failed with exit code $($dockerProcess.ExitCode)."
+                                    }
+
+                                    & $env:DOCKER_EXE tag $env:LOCAL_IMAGE "$($env:IMAGE_REPO):$($env:APP_VERSION)"
+                                    if ($LASTEXITCODE -ne 0) {
+                                        throw 'Unable to tag the immutable image for Docker Hub.'
+                                    }
+                                    & $env:DOCKER_EXE push "$($env:IMAGE_REPO):$($env:APP_VERSION)"
+                                    if ($LASTEXITCODE -ne 0) {
+                                        throw 'Docker Hub rejected the immutable image push.'
+                                    }
+                                    if ($env:PUBLISH_RELEASE_TAG -eq 'true') {
+                                        & $env:DOCKER_EXE tag $env:LOCAL_IMAGE "$($env:IMAGE_REPO):$($env:IMAGE_VERSION)"
+                                        if ($LASTEXITCODE -ne 0) {
+                                            throw 'Unable to create the optional release tag.'
+                                        }
+                                        & $env:DOCKER_EXE push "$($env:IMAGE_REPO):$($env:IMAGE_VERSION)"
+                                        if ($LASTEXITCODE -ne 0) {
+                                            throw 'Docker Hub rejected the optional release tag push.'
+                                        }
                                     }
                                 } finally {
                                     $dockerPat = $null
@@ -596,6 +726,14 @@ pipeline {
                                     if ($null -ne $dockerProcess) {
                                         $dockerProcess.Dispose()
                                     }
+                                    if ($hadDockerConfig) {
+                                        $env:DOCKER_CONFIG = $previousDockerConfig
+                                    } else {
+                                        Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
+                                    }
+                                    if (Test-Path -LiteralPath $tempConfig) {
+                                        Remove-Item -LiteralPath $tempConfig -Recurse -Force
+                                    }
                                 }
                             '''
                         }
@@ -604,93 +742,14 @@ pipeline {
             }
         }
 
-        stage('Docker image tagging and publishing') {
-            when { expression { params.PUBLISH_IMAGE && !params.DOCKER_AUTH_DIAGNOSTIC } }
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '''
-                            set -eu
-                            "$DOCKER_EXE" tag "$LOCAL_IMAGE" "$IMAGE_REPO:$IMAGE_VERSION"
-                            "$DOCKER_EXE" tag "$LOCAL_IMAGE" "$IMAGE_REPO:$GIT_SHORT_SHA"
-                            "$DOCKER_EXE" push "$IMAGE_REPO:$IMAGE_VERSION"
-                            "$DOCKER_EXE" push "$IMAGE_REPO:$GIT_SHORT_SHA"
-                        '''
-                    } else {
-                        bat '''
-                            @echo off
-                            "%DOCKER_EXE%" tag "%LOCAL_IMAGE%" "%IMAGE_REPO%:%IMAGE_VERSION%"
-                            if errorlevel 1 exit /b %errorlevel%
-                            "%DOCKER_EXE%" tag "%LOCAL_IMAGE%" "%IMAGE_REPO%:%GIT_SHORT_SHA%"
-                            if errorlevel 1 exit /b %errorlevel%
-                            "%DOCKER_EXE%" push "%IMAGE_REPO%:%IMAGE_VERSION%"
-                            if errorlevel 1 exit /b %errorlevel%
-                            "%DOCKER_EXE%" push "%IMAGE_REPO%:%GIT_SHORT_SHA%"
-                            if errorlevel 1 exit /b %errorlevel%
-                        '''
-                    }
-                }
-            }
-        }
-
-        stage('Kubernetes deployment') {
+        stage('Kubernetes deployment and verification') {
             when { expression { params.DEPLOY_TO_K8S && !params.DOCKER_AUTH_DIAGNOSTIC } }
             steps {
-                script {
-                    if (!params.PUBLISH_IMAGE) {
-                        error('DEPLOY_TO_K8S requires PUBLISH_IMAGE.')
-                    }
-                }
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     powershell '''
                         $ErrorActionPreference = 'Stop'
-                        $deploymentStarted = $false
-
-                        function Invoke-Kubectl {
-                            & kubectl @args
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "kubectl $($args -join ' ') failed with exit code $LASTEXITCODE"
-                            }
-                        }
-
-                        try {
-                            Invoke-Kubectl apply -f k8s/pvc.yaml
-                            Invoke-Kubectl apply -f k8s/rolling-update.yaml
-                            $deploymentStarted = $true
-                            Invoke-Kubectl set image deployment/aceest-rolling "aceest=$($env:IMAGE_REPO):$($env:APP_VERSION)"
-                            Invoke-Kubectl set env deployment/aceest-rolling "APP_VERSION=$($env:APP_VERSION)"
-                            Invoke-Kubectl rollout status deployment/aceest-rolling --timeout=180s
-                        } catch {
-                            if ($deploymentStarted) {
-                                Write-Warning 'Deployment failed; attempting rollback.'
-                                & kubectl rollout undo deployment/aceest-rolling
-                                if ($LASTEXITCODE -ne 0) {
-                                    Write-Warning 'Rollback command failed.'
-                                }
-                                & kubectl rollout status deployment/aceest-rolling --timeout=180s
-                                if ($LASTEXITCODE -ne 0) {
-                                    Write-Warning 'Deployment did not recover after rollback.'
-                                }
-                            }
-                            throw
-                        }
-                    '''
-                }
-            }
-        }
-
-        stage('Deployment verification') {
-            when { expression { params.DEPLOY_TO_K8S && !params.DOCKER_AUTH_DIAGNOSTIC } }
-            steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-                    bat '''
-                        @echo off
-                        kubectl get pods
-                        if errorlevel 1 exit /b %errorlevel%
-                        kubectl rollout status deployment/aceest-rolling --timeout=180s
-                        if errorlevel 1 exit /b %errorlevel%
-                        kubectl get service aceest-rolling-service
-                        if errorlevel 1 exit /b %errorlevel%
+                        & (Join-Path $PWD 'scripts/deploy-k8s.ps1') `
+                            -Image "$($env:IMAGE_REPO):$($env:APP_VERSION)"
                     '''
                 }
             }

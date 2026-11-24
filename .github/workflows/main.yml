@@ -34,8 +34,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Build image
-        run: docker build --target runtime --tag aceest-fitness-devops:${{ github.sha }} .
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: aceest-fitness-devops:sha-${{ github.sha }}
+          build-args: |
+            APP_VERSION=sha-${{ github.sha }}
 
   container-tests:
     runs-on: ubuntu-latest
@@ -44,12 +52,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
       - name: Build test image
-        run: docker build --target test --tag aceest-fitness-devops:test .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          load: true
+          tags: aceest-fitness-devops:test
       - name: Run pytest inside container
         run: docker run --rm aceest-fitness-devops:test python -m pytest -q
       - name: Build runtime image
-        run: docker build --target runtime --tag aceest-fitness-devops:runtime .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: aceest-fitness-devops:runtime
       - name: Verify health endpoint
         run: |
           docker run --detach --name aceest-app -p 5000:5000 aceest-fitness-devops:runtime

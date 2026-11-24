@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: aceest-ab-a
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: aceest-ab
@@ -21,14 +21,16 @@ spec:
         fsGroup: 10001
       containers:
         - name: aceest
-          image: aceest-fitness:3.2.4
+          image: aceest-fitness:sha-0000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 5000
           env:
             - name: APP_VERSION
-              value: "3.2.4"
+              value: "sha-0000000000000000000000000000000000000000"
+            - name: SHADOW_MODE
+              value: "true"
             - name: ACEEST_DB_PATH
               value: /data/aceest_fitness.db
             - name: SESSION_COOKIE_SECURE
@@ -65,20 +67,22 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          envFrom:
+            - configMapRef:
+                name: aceest-config
           volumeMounts:
             - name: data
               mountPath: /data
       volumes:
         - name: data
-          persistentVolumeClaim:
-            claimName: aceest-data
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aceest-ab-b
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: aceest-ab
@@ -96,14 +100,16 @@ spec:
         fsGroup: 10001
       containers:
         - name: aceest
-          image: aceest-fitness:3.2.4
+          image: aceest-fitness:sha-0000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 5000
           env:
             - name: APP_VERSION
-              value: "3.2.4"
+              value: "sha-0000000000000000000000000000000000000000"
+            - name: SHADOW_MODE
+              value: "true"
             - name: ACEEST_DB_PATH
               value: /data/aceest_fitness.db
             - name: SESSION_COOKIE_SECURE
@@ -140,13 +146,15 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          envFrom:
+            - configMapRef:
+                name: aceest-config
           volumeMounts:
             - name: data
               mountPath: /data
       volumes:
         - name: data
-          persistentVolumeClaim:
-            claimName: aceest-data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

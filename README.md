@@ -1,221 +1,242 @@
 # ACEest Fitness & Gym
 
-ACEest Fitness & Gym is a Flask web application for fitness staff to manage clients, training programs, workouts, memberships, and progress. Assignment 2 adds automated validation, code-quality analysis, container packaging, and Kubernetes deployment configuration while retaining the Assignment 1 application, templates, styles, and workflows.
+ACEest Fitness is a Flask application for managing gym clients, memberships, workout plans, workout history, progress, and fitness metrics. The repository continues the Assignment 1 application with the Assignment 2 quality, container, CI/CD, and deployment work.
 
-## Application features
+## Application and architecture
 
-- Staff login with credentials supplied through environment variables
-- Dashboard with client, membership, program, and workout summaries
-- Client create, view, update, and delete operations
-- Fat Loss, Muscle Gain, and Beginner programs with calorie factors 22, 35, and 26
-- Rule-based program generation for beginner, intermediate, and advanced levels
-- Workout logging with exercise details, body-metric history, BMI estimates, and adherence/weight trend charts
-- Downloadable client fitness reports in PDF format
-- Membership end dates and JSON health endpoint at `/health`
+- Flask application and Jinja templates serve the UI and `/health` endpoint.
+- SQLite stores users, clients, progress, workouts, exercises, and metrics.
+- The default development database is under `instance/`; the container and Kubernetes configurations keep runtime data under `/data`.
+- The Docker runtime uses Gunicorn, a non-root account, a read-only root filesystem, a writable data volume, and an HTTP health check.
+- Jenkins and GitHub Actions run linting and tests. The Docker test target runs the same pytest suite.
 
-The application factory and SQLite data access are in `app.py`. Browser views are in `templates/`, styles are in `static/`, and tests use temporary databases.
+SQLite is a single-writer, local-file database. The supported Kubernetes application deployment therefore uses **one replica** and does not create an overlapping pod during a rolling update. Blue/green switching is sequential and has downtime. Canary and A/B templates are read-only demonstrations with isolated ephemeral databases; they are not production configurations for persistent application data.
 
-## Project Architecture
+## Assignment 1 application features
 
-```text
-Staff browser
-    -> Flask application served by Gunicorn
-    -> SQLite database on the application data volume
-
-GitHub
-    -> GitHub Actions: syntax, lint, tests, container build, health check
-    -> Jenkins: tests, coverage, SonarQube Quality Gate, Docker build
-    -> Optional Docker Hub publish and Kubernetes deployment
-```
-
-The Flask application exposes its health check at `/health`. Kubernetes probes use that endpoint, while the Service routes cluster traffic to the application pods.
+- Login and session-based access control.
+- Client profiles and fitness-program selection.
+- Membership tracking.
+- Workout logging and exercise tracking.
+- Progress and body-metric records.
+- Fitness dashboard and reports.
+- SQLite persistence and application health endpoint.
 
 ## Technology
 
-- Python 3.12, Flask, SQLite, Gunicorn, and ReportLab for PDF reports
-- Pytest, pytest-cov, Ruff, and PyYAML
-- Docker
-- Jenkins and GitHub Actions
-- SonarQube
-- Kubernetes and Minikube
-- PowerShell helper scripts
+- Python 3.12 in the Docker image and GitHub Actions.
+- Python 3.14.10 on the Windows Jenkins agent used by the recorded successful Build #47.
+- Flask, Gunicorn, SQLite, pytest, pytest-cov, Ruff, Docker Buildx, Jenkins, Kubernetes, and optional Istio routing resources.
+
+The Jenkins host and container Python versions intentionally differ. Build #47 exercised the Jenkins host on Python 3.14.10 and the Docker test image on Python 3.12. Dependencies should be changed only after compatibility is verified for both environments.
+
+## Repository structure
+
+```text
+app.py                         Flask application and business logic
+tests/                         Unit, application, and manifest tests
+templates/                     Jinja views
+static/                        Stylesheets and browser assets
+Dockerfile                     Python 3.12 runtime and test targets
+.github/workflows/main.yml     GitHub Actions CI
+Jenkinsfile                    Parameter-controlled Windows Jenkins pipeline
+k8s/                           Rolling, blue/green, canary, shadow, and A/B examples
+kubernetes/                    Assignment Deployment and Service manifests
+scripts/                       Deployment, rollback, and health-check helpers
+report/                        Assignment 2 report
+reports/                       Assignment submission report
+```
+
+## Git and GitHub workflow
+
+The established branch is `main`. For changes, create a focused feature branch, run the local checks, open a pull request, and merge through the repository's normal review process. GitHub Actions runs on pushes and pull requests; the Jenkins multibranch job checks out its configured branch and `Jenkinsfile`.
+
+```powershell
+git switch -c feature/short-description
+git status --short
+git diff --check
+git diff
+```
+
+Never commit local virtual environments, databases, coverage output, `.env` files, credentials, or Kubernetes Secret manifests. Use a protected local environment file or a managed secret store for values.
 
 ## Local setup
 
-Run these commands from the repository directory:
+Use Python 3.12–3.14. Python 3.12 is the container and GitHub Actions target.
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
-
-$env:DEMO_USERNAME = Read-Host "Choose a local administrator username"
-$localPassword = Read-Host "Choose a local administrator password" -AsSecureString
-$env:DEMO_PASSWORD = [System.Net.NetworkCredential]::new("", $localPassword).Password
-$env:SECRET_KEY = python -c "import secrets; print(secrets.token_urlsafe(32))"
 python app.py
 ```
 
-Open `http://127.0.0.1:5000/`. Do not commit environment files or credentials. `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `FLASK_SECRET_KEY` are also accepted for container and Kubernetes configuration.
+Open `http://127.0.0.1:5000`. Configure the initial administrator and Flask session key through environment variables; never place real values in source control. The development database path can be set with `DATABASE_PATH` or `ACEEST_DB_PATH`.
 
 ## Tests and coverage
 
 ```powershell
 python -m compileall -q app.py tests
 python -m ruff check app.py tests
-python -m pytest -q
+python -m pytest -q --junitxml=reports/pytest-results.xml
 python -m pytest -q --cov=app --cov-report=xml:coverage.xml --cov-report=html:coverage_html --cov-report=term-missing
 ```
 
-On Windows, `.\scripts\run-local-tests.ps1` runs the coverage command. Generated coverage, cache, database, and temporary files are excluded from Git.
+The Jenkins pipeline archives JUnit and coverage reports. `.gitignore` excludes generated coverage, pytest, bytecode, local database, and temporary files.
 
-## Docker Build Instructions
+## Docker build and runtime check
 
-Build the runtime image:
-
-```powershell
-docker build --target runtime --build-arg APP_VERSION=3.2.4 -t aceest-fitness:3.2.4 .
-```
-
-Provide credentials from the current shell when running the container:
+Docker Desktop must be running with the Linux container engine. Buildx is preferred; the Jenkins pipeline falls back to `docker build` with BuildKit enabled and does not support the legacy builder.
 
 ```powershell
-docker run --rm -p 5000:5000 `
-  --env DEMO_USERNAME `
-  --env DEMO_PASSWORD `
-  --env SECRET_KEY `
-  aceest-fitness:3.2.4
+$sha = (git rev-parse HEAD).Trim()
+$tag = "sha-$sha"
+$docker = (Get-Command docker.exe -ErrorAction Stop).Source
+
+docker buildx build --load --target test --tag aceest-fitness:test-local .
+docker run --rm aceest-fitness:test-local
+
+docker buildx build --load --target runtime --build-arg "APP_VERSION=$tag" --tag "aceest-fitness:$tag" .
+.\scripts\check-container-health.ps1 -DockerExe $docker -Image "aceest-fitness:$tag"
 ```
 
-The runtime image runs Gunicorn as a non-root user, stores SQLite data under `/data`, and exposes `/health`. To run the test stage:
-
-```powershell
-docker build --target test -t aceest-fitness:test .
-docker run --rm aceest-fitness:test
-```
+The runtime image contains a Docker `HEALTHCHECK`; the script additionally waits for the container health state and calls `/health`. The `sha-<40-character-commit>` tag is the deployment identity. Release aliases are optional and must not replace the SHA tag.
 
 ## GitHub Actions
 
-The workflow in `.github/workflows/main.yml` installs development dependencies, compiles and lints the Python code, runs tests, builds the runtime and test images, runs the test image, and checks the runtime health endpoint. It runs on pushes and pull requests.
+`.github/workflows/main.yml` runs syntax validation, Ruff, pytest, a runtime image build, container tests, and an HTTP health check for pushes and pull requests. Docker jobs use Buildx and load images locally; they do not publish or deploy.
 
-## CI/CD Pipeline Flow
+## Jenkins pipeline
 
-GitHub Actions runs syntax validation, Ruff, Pytest, and Docker image/container checks. Jenkins runs the ordered pipeline below, including coverage and the SonarQube Quality Gate before building and optionally publishing or deploying the image.
+The Jenkinsfile is written for the configured Windows Jenkins worker: Python setup uses PowerShell and Windows virtual-environment paths, while CLI stages use `bat` and PowerShell. The Windows worker must have Python 3.12–3.14, Git, Docker Desktop's Linux engine, Docker Buildx (or a BuildKit-capable `docker build`), and `kubectl` for deployment. Jenkins currently connects to Docker Desktop through `npipe:////./pipe/dockerDesktopLinuxEngine`.
 
-## Jenkins Pipeline Stages
+Pipeline stages:
 
-`Jenkinsfile` runs these stages in order:
+1. Checkout the configured SCM branch.
+2. Verify Python and create `.venv`.
+3. Install development dependencies.
+4. Compile Python and run Ruff.
+5. Run pytest with JUnit output.
+6. Generate coverage XML and HTML reports.
+7. Run SonarQube analysis and wait for its quality gate when the plugin/server are configured.
+8. Build the runtime and test images with Buildx where available.
+9. Run container tests and runtime health verification.
+10. Authenticate to Docker Hub and push the immutable SHA tag only when `PUBLISH_IMAGE=true`; an additional `IMAGE_VERSION` alias requires `PUBLISH_RELEASE_TAG=true`.
+11. Deploy the published SHA to Kubernetes only when `DEPLOY_TO_K8S=true`; rollout and health failures trigger a rollback attempt.
 
-1. Checkout and select `IMAGE_VERSION` or the repository `VERSION`.
-2. Set up Python and install `requirements-dev.txt`.
-3. Compile Python and run Ruff.
-4. Run Pytest and publish JUnit results.
-5. Generate XML/HTML coverage reports.
-6. Run SonarQube analysis and wait for the Quality Gate.
-7. Build the versioned runtime image and the isolated test image; run the container tests.
-8. Optionally authenticate to Docker Hub, tag the image with version and commit SHA, and push both tags.
-9. Optionally deploy the pushed image to Kubernetes, roll back on a failed rollout, and verify deployment status and Service.
+`PUBLISH_IMAGE`, `PUBLISH_RELEASE_TAG`, `DEPLOY_TO_K8S`, and `DOCKER_AUTH_DIAGNOSTIC` all default to `false`. Deployment requires image publishing; the authentication diagnostic cannot be combined with publishing or deployment. Optional stages are reported as skipped when disabled.
 
-Configure Jenkins with:
+### SonarQube prerequisites
 
-- A Multibranch Pipeline or Pipeline-from-SCM job pointing at this repository and `Jenkinsfile`.
-- An agent with Python 3 (including `venv`/`pip`), Git, Docker CLI with daemon access, `sonar-scanner` on `PATH`, and `kubectl` when deployment is enabled. The Jenkinsfile supports Windows agents using `PYTHON_EXE` and `DOCKER_EXE` parameters and Linux agents using the Docker CLI from `PATH`.
-- The Jenkins Git, Pipeline/Declarative Pipeline, SonarQube Scanner, Credentials Binding, and JUnit plugins. Docker Pipeline is not used; the Jenkinsfile invokes the Docker CLI.
-- A SonarQube server configured with the name `sonarqube`, and a SonarQube webhook to `<JENKINS_URL>/sonarqube-webhook/` for Quality Gate callbacks.
-- A Docker Hub **Secret text** credential with ID `dockerhub-pat-working`; set `DOCKER_USER` to the Docker Hub username.
-- A Kubernetes kubeconfig **Secret file** credential with ID `kubeconfig` when deployment is enabled.
+The last Jenkins audit found the SonarQube Scanner plugin/server configuration unavailable. In that state the analysis and quality-gate stages are skipped and are **not a pass**. Configure the plugin and the Jenkins server named `sonarqube` before expecting analysis. Once analysis is active, a failed quality gate aborts the pipeline.
 
-`DOCKER_EXE` defaults to `C:\Users\ruchi\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe` on Windows. Set `IMAGE_REPO` to the Docker Hub namespace/repository to publish. `PUBLISH_IMAGE` and `DEPLOY_TO_K8S` default to false; deployment requires publishing to be enabled. Store credentials in Jenkins or the cluster, not in this repository.
+### Docker Hub publishing
 
-## SonarQube Analysis
+The Jenkins credential ID `dockerhub-pat-working` was present in the last credential audit; this does not prove that the token is valid. The pipeline uses it only inside the publishing or explicitly requested diagnostic stage, pipes it to `docker login --password-stdin`, uses a temporary Docker config directory, and removes that directory afterward. No token belongs in Git or a command-line argument.
 
-The repository's `sonar-project.properties` configures source, test, and coverage locations. Jenkins runs analysis after coverage generation and blocks later stages if the Quality Gate fails. A local scan can be run after generating `coverage.xml`:
+To publish, first confirm the credential and repository access with the repository administrator, then run the Jenkins build with:
 
-```powershell
-sonar-scanner -Dproject.settings=sonar-project.properties
-```
+- `PUBLISH_IMAGE=true`
+- `PUBLISH_RELEASE_TAG=false` unless a mutable alias is intentionally needed
+- `DEPLOY_TO_K8S=false` unless the cluster prerequisites below are ready
+- `DOCKER_AUTH_DIAGNOSTIC=false`
 
-## Kubernetes Deployment Instructions
+The immutable image is pushed as `IMAGE_REPO:sha-<full-commit-SHA>`. The optional `IMAGE_VERSION` alias is secondary.
 
-The primary rolling deployment uses `k8s/rolling-update.yaml` and the persistent volume claim in `k8s/pvc.yaml`. Create the `aceest-secrets` Kubernetes Secret with keys `admin-username`, `admin-password`, and `flask-secret-key` using your cluster's approved secret-handling process. Do not add Secret manifests or credential values to Git.
+## Kubernetes prerequisites and supported deployment
 
-Build and load the image into Minikube, then apply the rolling resources:
+The supported workload uses a single SQLite-backed pod, a `ReadWriteOnce` PVC, readiness/startup/liveness probes, resource requests and limits, and a ClusterIP Service. `maxSurge: 0` prevents two application pods from mounting the SQLite volume at once; updates can therefore have brief downtime. The Kubernetes templates use a zero-SHA sentinel image which must be replaced by the deployment helper; do not apply the rolling manifest directly.
 
-```powershell
-minikube start
-docker build --target runtime --build-arg APP_VERSION=3.2.4 -t aceest-fitness:3.2.4 .
-minikube image load aceest-fitness:3.2.4
-kubectl apply -f k8s/pvc.yaml
-kubectl apply -f k8s/rolling-update.yaml
-kubectl rollout status deployment/aceest-rolling --timeout=180s
-kubectl port-forward service/aceest-rolling-service 18080:80
-```
-
-In another terminal, check `http://127.0.0.1:18080/health`. The rolling Service is ClusterIP. `k8s/service.yaml` belongs to the separate blue-green setup and should not be applied for the rolling deployment.
-
-The assignment submission manifests are also available under `kubernetes/`. They define the `aceest-assignment` Deployment and matching ClusterIP Service. After building/loading `aceest-fitness:3.2.4`, creating the `aceest-secrets` Secret, and applying `k8s/pvc.yaml`, apply the assignment manifests:
+Before deploying, provide a working cluster context, `kubectl`, a storage class that supports the PVC, and a Secret named `aceest-secrets` containing keys `admin-username`, `admin-password`, and `flask-secret-key`. Keep the protected source file outside the repository:
 
 ```powershell
-kubectl apply -f kubernetes/deployment.yaml
-kubectl apply -f kubernetes/service.yaml
-kubectl rollout status deployment/aceest-assignment --timeout=180s
-kubectl port-forward service/aceest-assignment-service 18080:80
+kubectl config current-context
+$secretFile = Read-Host "Path to the protected environment file"
+kubectl create secret generic aceest-secrets --from-env-file="$secretFile"
 ```
 
-The existing Jenkins deployment continues to use `k8s/rolling-update.yaml`; the two deployment examples have separate names and selectors.
-
-The sample manifests use non-secure session cookies for local HTTP demonstrations. For a production deployment behind TLS, set `SESSION_COOKIE_SECURE=true` through the deployment configuration.
-
-Update the rolling deployment and roll it back with:
+Build and publish the exact commit image, then deploy that immutable tag:
 
 ```powershell
-kubectl set image deployment/aceest-rolling aceest=aceest-fitness:3.2.5
-kubectl set env deployment/aceest-rolling APP_VERSION=3.2.5
-kubectl rollout status deployment/aceest-rolling --timeout=180s
-kubectl rollout history deployment/aceest-rolling
-kubectl rollout undo deployment/aceest-rolling
-kubectl rollout status deployment/aceest-rolling --timeout=180s
+$sha = (git rev-parse HEAD).Trim()
+$image = "ruchitabits/aceest-fitness:sha-$sha"
+.\scripts\deploy-k8s.ps1 -Image $image
 ```
 
-The blue-green, canary, shadow, and A/B resources are separate examples. Canary, shadow, and A/B traffic routing require Istio or a compatible service mesh. Read the notes under `deployment-strategies/` and apply only the resources needed for a specific strategy. PowerShell helpers are in `scripts/`.
+The deployment helper applies the ConfigMap and PVC, renders the Deployment with the selected SHA image, waits for rollout, checks Service endpoints and `/health`, and attempts `kubectl rollout undo` plus health verification if rollout or health verification fails. Rollback requires a previous Deployment revision. Manual rollback:
 
-## Repository layout
-
-```text
-app.py                       Flask application and SQLite access
-templates/ and static/       Assignment 1 browser interface
-tests/                       Application and Kubernetes manifest tests
-k8s/                         Existing deployment strategy manifests
-kubernetes/                  Assignment Deployment and Service manifests
-deployment-strategies/       Deployment strategy notes
-scripts/                     PowerShell deployment and test helpers
-report/                      Assignment 2 submission report
-reports/                     Existing audit report and CI test outputs
-Dockerfile                   Test and non-root runtime image stages
-Jenkinsfile                  Jenkins CI/CD pipeline
-sonar-project.properties     SonarQube and coverage settings
+```powershell
+.\scripts\rollback-k8s.ps1
 ```
 
-## Assignment Deliverables
+The Jenkins credential ID `kubeconfig` was not present in the last audit. Kubernetes deployment remains unavailable until that credential and a reachable cluster are provisioned. The current workspace has no verified Kubernetes context; no deployment has been run.
 
-- Flask application and automated tests
-- GitHub Actions and Jenkins CI/CD configuration
-- Docker runtime and test image definitions
-- SonarQube project configuration
-- Kubernetes rolling Deployment and Service manifests
-- Assignment report at `report/Assignment2_Report.md`
+## Deployment strategy examples
 
-## Submission Evidence Placeholders
+All manifests reference an immutable SHA-shaped sentinel until a helper or `kubectl set image` supplies a real published tag. The advanced Istio examples are not executed in this environment.
 
-Replace each placeholder only with evidence captured from the corresponding environment.
+### 1. Rolling update
 
-- Application endpoint URL: `[Deployment URL: pending deployment]`
-- Jenkins pipeline: `[Screenshot placeholder: Jenkins stages and successful build]`
-- SonarQube: `[Screenshot placeholder: analysis and Quality Gate]`
-- Docker: `[Screenshot placeholder: image build and container health check]`
-- Kubernetes: `[Screenshot placeholder: Deployment, Pods, Service, and health check]`
+`k8s/rolling-update.yaml` and `scripts/deploy-k8s.ps1` provide the supported single-replica SQLite update. The old pod is stopped before its replacement starts. Verify with `kubectl rollout status` and `/health`; use `scripts/rollback-k8s.ps1` to restore the previous revision. Brief downtime is expected.
 
-## External validation
+### 2. Blue-green
 
-Docker, Kubernetes/Minikube, Jenkins, SonarQube, and Docker Hub require their respective local services, agents, credentials, or accounts. Their build, scan, deployment, and publishing results must be captured in those environments; this repository does not claim those external steps ran without evidence.
+`k8s/deployment-blue.yaml`, `k8s/deployment-green.yaml`, and `k8s/service.yaml` define two color tracks and a selector-based Service. Both color Deployments start at zero replicas. `scripts/switch-blue-green.ps1 -Target <blue|green> -Image <repository:sha-40hex>` drains and stops the previous color before starting the target, then switches the Service and checks health. If the switch or health check fails, it attempts to restore the previous color and Service selector. Because both colors use the same SQLite PVC, this is a **sequential, downtime handoff**, not simultaneous blue/green capacity.
+
+### 3. Canary
+
+`k8s/canary.yaml` defines Istio weighted routing (90% stable / 10% canary) and disabled-by-default workloads. Both workloads use isolated ephemeral storage and `SHADOW_MODE=true`, so they are suitable only for non-mutating demonstration requests such as `/health`. Istio and an ingress gateway are required. Do not use this as a production canary for writes or persistent user data.
+
+After an Istio-enabled cluster is prepared for this read-only demonstration, set real SHA images, scale both deployments to one, wait for readiness, and adjust traffic with:
+
+```powershell
+.\scripts\set-canary-weight.ps1 -CanaryPercent 10
+```
+
+Set the canary percentage to `0` to route all requests back to stable. A production canary requires the application to use a shared external database; that database integration is not implemented.
+
+### 4. Shadow
+
+`k8s/shadow.yaml` mirrors traffic through Istio from a primary instance to a copy. The primary is the only SQLite-backed writer; the copy uses `emptyDir` and `SHADOW_MODE=true`, which suppresses state-changing requests. Configure the real SHA image and both required services before applying. Verify the mirror's health/logs, not its database state. Disable mirroring by removing or setting the VirtualService mirror to zero. This is safe for observation but does not provide production-like shared data.
+
+### 5. A/B
+
+`k8s/ab-testing.yaml` routes requests with `x-aceest-group: beta` to version B and other requests to version A. The deployments are disabled initially and use isolated ephemeral storage plus `SHADOW_MODE=true`; this makes read-only routing tests safe with SQLite but not representative for writes or persistent user records. Istio and an ingress gateway are required. Roll back by routing the VirtualService only to subset `a` and scaling B to zero. Real A/B business testing requires a shared external datastore and is not implemented.
+
+## Assignment requirement mapping
+
+The official assignment specification files were not present in the repository during this review; this mapping uses the requirements supplied in the task.
+
+| Requirement | Implementation | Status / limits |
+|---|---|---|
+| Preserve Assignment 1 application behavior | `app.py`, templates, static assets, and tests retained | Preserved; no business logic rewrite |
+| Source control and CI trigger | GitHub Actions workflow and Jenkins SCM pipeline | Configured; no new run triggered by these local edits |
+| Lint, tests, JUnit, coverage | Jenkinsfile, `requirements-dev.txt`, pytest configuration | Existing Build #47 passed 32 tests and reported 92%; rerun the updated suite before submission |
+| SonarQube and quality gate | Jenkinsfile and `sonar-project.properties` | Not configured in Jenkins as of the last audit |
+| Container build, tests, health | Dockerfile, Buildx CI steps, health endpoint and check script | Build #47 built both images and ran 32 container tests; new health step requires local validation |
+| Immutable image publishing | Jenkins SHA tagging and optional release alias | Implemented; not executed; credential validity and registry access remain external |
+| SQLite-safe Kubernetes rolling update | Single replica, RWO PVC, no surge, probes, resource limits, health/rollback scripts | Implemented; not deployed because cluster context/credential is unavailable |
+| Blue-green, canary, shadow, A/B examples | Kubernetes manifests, switch/weight scripts, and this guide | Implemented as described; canary/A/B are read-only demonstrations, not persistent production strategies |
+| Assignment evidence | Evidence checklist below | Capture genuine screenshots/logs only after running the corresponding stage |
+
+## Submission evidence checklist
+
+- [ ] GitHub Actions run for the final commit, with lint, tests, container tests, and health check.
+- [ ] Jenkins build for the final commit, with the console output and archived JUnit/coverage reports.
+- [ ] SonarQube analysis and quality-gate result, if the Jenkins plugin/server is configured.
+- [ ] Docker Hub repository showing the immutable SHA tag, if publishing is authorized.
+- [ ] Kubernetes rollout, service health, and rollback evidence, only after cluster and credentials are available.
+- [ ] Istio routing evidence for each requested strategy, clearly identifying read-only demo limitations.
+
+Do not present a skipped stage, unavailable service, or unexecuted deployment as a pass.
+
+## Troubleshooting
+
+- **Docker pipe/engine unavailable:** start Docker Desktop's Linux engine and verify `docker info` under the Jenkins service identity; a working interactive CLI alone does not prove Jenkins access.
+- **Buildx unavailable:** the pipeline tries BuildKit-enabled `docker build`; Docker Engine must support BuildKit. Legacy builder mode is intentionally unsupported.
+- **Python setup fails:** set `PYTHON_EXE` to an existing Python 3.12, 3.13, or 3.14 executable visible to the Jenkins service account.
+- **Sonar stages skip:** configure the SonarQube Scanner plugin and Jenkins server named `sonarqube`; a skip is not a quality-gate pass.
+- **Image pull fails:** confirm the SHA tag was pushed and the cluster can pull the repository; do not substitute a mutable tag for the deployment image.
+- **PVC or rollout stalls:** check the storage class, `ReadWriteOnce` binding, `kubectl describe pod`, and events. Keep one writer for SQLite.
+- **Kubernetes deployment is unavailable:** confirm `kubectl config current-context`, a reachable cluster, and the Jenkins `kubeconfig` credential. Do not enable deployment until all are confirmed.
